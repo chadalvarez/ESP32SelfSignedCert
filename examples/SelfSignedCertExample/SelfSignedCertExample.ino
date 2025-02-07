@@ -1,12 +1,11 @@
-#include <Arduino.h>
-#include <WiFi.h>
-#include <LittleFS.h>
+// You can verify if certs match here: <https://www.sslshopper.com/certificate-key-matcher.html>
+
 #include "ESP32SelfSignedCert.h"
 
-// Create an instance of the library
-ESP32SelfSignedCert certGenerator;
+ESP32SelfSignedCert myCert;
 
-// Define certificate settings (adjust as needed)
+
+// ALTERNATIVE: Define certificate settings (adjust as needed)
 CertSettings myCertSettings = {
     "ESP32",             // Common Name (CN)
     "MyOrganization",    // Organization (O)
@@ -16,25 +15,52 @@ CertSettings myCertSettings = {
 };
 
 void setup() {
-    Serial.begin(115200);
-    delay(1000);
+  delay(1000);
+  Serial.begin(115200);
 
-    // Start LittleFS
-    if (!certGenerator.beginFS()) {
-        Serial.println("LittleFS init failed. Halting.");
-        while (1) { delay(10); }
-    }
+  Serial.println("\n\nGenerating Certificate...\n\n");
 
-    Serial.println("\n[Example] Generating Self-Signed Certificate...");
+  // Initialize LittleFS with optional formatting
+  if (!myCert.beginFS(true)) {
+    Serial.println("Failed to initialize LittleFS.");
+    while (true);
+  }
 
-    // Generate in PEM format (true). You can also pass false for DER
-    certGenerator.generateSelfSignedCertificate(true, myCertSettings,
-                                                "/cert.pem",
-                                                "/privkey.pem");
+  // Generate a self-signed certificate using default settings
+  if (myCert.generate()) {
+    Serial.println("Certificate generated successfully.");
+  } else {
+    Serial.println("Certificate generation failed.");
+  }
 
-    Serial.println("\nDone generating certificate.");
+
+
+  // ALTERNATIVE: Generate in PEM format (true). You can also pass false for DER
+  //certGenerator.generateSelfSignedCertificate(true, myCertSettings, "/cert.pem", "/privkey.pem");
+
+
+
+/*
+  // Print certificate and key to Serial
+  Serial.println("Certificate:");
+  Serial.println(myCert.getCert());
+  Serial.println("Private Key:");
+  Serial.println(myCert.getPrivateKey());
+
+  // Print contents of the saved certificate file
+  myCert.printFile("/cert.pem");
+/**/
+
+  // Extract and print certificate details to validate the certificate
+  if (myCert.extractCertDetails()) {
+    Serial.println("Certificate details extracted successfully.");
+  } else {
+    Serial.println("Failed to extract certificate details.");
+  }
+
 }
 
 void loop() {
-    // ...
+
 }
+

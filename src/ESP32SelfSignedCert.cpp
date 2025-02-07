@@ -1,21 +1,51 @@
 #include "ESP32SelfSignedCert.h"
+#include <time.h>  // For time functions used in generate()
 
+/**
+ * Constructor.
+ */
 ESP32SelfSignedCert::ESP32SelfSignedCert() {
-    // Constructor
+    // Clear internal buffers upon initialization
+    memset(certBuffer, 0, CERT_BUFFER_SIZE);
+    memset(keyBuffer, 0, KEY_BUFFER_SIZE);
 }
 
+/**
+ * Destructor.
+ */
 ESP32SelfSignedCert::~ESP32SelfSignedCert() {
-    // Destructor
+    // No dynamic allocation used; nothing to free here.
 }
 
-bool ESP32SelfSignedCert::beginFS() {
+/**
+ * Initialize LittleFS.
+ * If mounting fails and 'format' is true, attempt to format LittleFS.
+ */
+bool ESP32SelfSignedCert::beginFS(bool format) {
     if (!LittleFS.begin()) {
         Serial.println("[ESP32SelfSignedCert] Failed to mount LittleFS");
-        return false;
+        if (format) {
+            Serial.println("[ESP32SelfSignedCert] Formatting LittleFS...");
+            if (LittleFS.format()) {
+                Serial.println("[ESP32SelfSignedCert] Format successful. Re-mounting LittleFS...");
+                if (!LittleFS.begin()) {
+                    Serial.println("[ESP32SelfSignedCert] Failed to mount LittleFS after formatting");
+                    return false;
+                }
+            } else {
+                Serial.println("[ESP32SelfSignedCert] Formatting LittleFS failed");
+                return false;
+            }
+        } else {
+            return false;
+        }
     }
     return true;
 }
 
+/**
+ * Save a null-terminated string to a file in LittleFS.
+ */
 bool ESP32SelfSignedCert::saveToFile(const char *filename, const char *data) {
     File file = LittleFS.open(filename, "w");
     if (!file) {
@@ -28,29 +58,32 @@ bool ESP32SelfSignedCert::saveToFile(const char *filename, const char *data) {
     return true;
 }
 
+/**
+ * Generate a self-signed certificate using mbedTLS with the provided settings.
+ * The certificate and key are stored in the internal buffers and optionally saved
+ * to LittleFS in PEM or DER format.
+ */
 void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
                                                         const CertSettings &settings,
                                                         const char *certFile,
                                                         const char *keyFile)
 {
-
-    // Configure certificate details
+    // Build the subject string (e.g., "CN=ESP32,O=MyOrg,C=US")
     String subject = "CN=" + settings.commonName +
                      ",O=" + settings.organization +
                      ",C=" + settings.country;
 
-    // Clear buffers
+    // Clear internal buffers
     memset(certBuffer, 0, CERT_BUFFER_SIZE);
     memset(keyBuffer, 0, KEY_BUFFER_SIZE);
 
+    // Initialize mbedTLS contexts
     mbedtls_pk_context key;
     mbedtls_x509write_cert cert;
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
-
     const char *pers = "self_signed_cert";
 
-    // Initialize contexts
     mbedtls_pk_init(&key);
     mbedtls_x509write_crt_init(&cert);
     mbedtls_entropy_init(&entropy);
@@ -67,7 +100,7 @@ void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
         goto cleanup;
     }
 
-    // Generate a 2048-bit RSA key pair
+    // Set up key context for a 2048-bit RSA key pair
     ret = mbedtls_pk_setup(&key, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
     if (ret != 0) {
         Serial.println("[ESP32SelfSignedCert] Failed to setup key context");
@@ -83,6 +116,7 @@ void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
         goto cleanup;
     }
 
+    // Set both the subject and issuer name (self-signed certificate)
     ret = mbedtls_x509write_crt_set_subject_name(&cert, subject.c_str());
     if (ret != 0) {
         Serial.printf("[ESP32SelfSignedCert] Failed to set subject name, error 0x%04X\n", -ret);
@@ -94,7 +128,7 @@ void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
         goto cleanup;
     }
 
-    // Generate and set serial number
+    // Generate a random serial number
     unsigned char serial[16];
     mbedtls_ctr_drbg_random(&ctr_drbg, serial, sizeof(serial));
 
@@ -105,7 +139,7 @@ void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
         goto cleanup;
     }
 #else
-    // For ESP32 Arduino < v3.0.0
+    // For older ESP32 Arduino versions
     {
         mbedtls_mpi serial_mpi;
         mbedtls_mpi_init(&serial_mpi);
@@ -119,7 +153,7 @@ void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
     }
 #endif
 
-    // Validity: YYYYMMDDHHMMSS
+    // Set certificate validity period (format: YYYYMMDDHHMMSS)
     ret = mbedtls_x509write_crt_set_validity(&cert,
                                              settings.validFrom.c_str(),
                                              settings.validTo.c_str());
@@ -128,12 +162,15 @@ void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
         goto cleanup;
     }
 
+    // Configure certificate version and hash algorithm
     mbedtls_x509write_crt_set_md_alg(&cert, MBEDTLS_MD_SHA256);
     mbedtls_x509write_crt_set_version(&cert, MBEDTLS_X509_CRT_VERSION_3);
+
+    // Bind the key to the certificate as both subject and issuer key
     mbedtls_x509write_crt_set_subject_key(&cert, &key);
     mbedtls_x509write_crt_set_issuer_key(&cert, &key);
 
-    // Write the certificate to buffer
+    // Write the certificate into the internal buffer
     if (usePEM) {
         ret = mbedtls_x509write_crt_pem(&cert,
                                         (unsigned char *)certBuffer,
@@ -147,24 +184,21 @@ void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
                                         mbedtls_ctr_drbg_random,
                                         &ctr_drbg);
     }
-
     if (ret < 0) {
         Serial.printf("[ESP32SelfSignedCert] Failed to write certificate: -0x%04X\n", -ret);
         goto cleanup;
     }
 
-    // Write the private key to buffer (PEM format)
+    // Write the private key (always in PEM format) into the internal buffer
     ret = mbedtls_pk_write_key_pem(&key, (unsigned char *)keyBuffer, KEY_BUFFER_SIZE);
     if (ret != 0) {
         Serial.println("[ESP32SelfSignedCert] Failed to write private key");
         goto cleanup;
     }
 
-    // Save the results to LITTLEFS
+    // Save certificate and key to files in LittleFS
     if (usePEM) {
-        // PEM certificate
         saveToFile(certFile, certBuffer);
-        // PEM private key
         saveToFile(keyFile, keyBuffer);
 
         Serial.println("[ESP32SelfSignedCert] Certificate (PEM):\n");
@@ -172,7 +206,6 @@ void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
         Serial.println("[ESP32SelfSignedCert] Private Key (PEM):\n");
         Serial.println(keyBuffer);
     } else {
-        // DER certificate (binary). 'ret' is the size in bytes
         File derFile = LittleFS.open(certFile, "w");
         if (!derFile) {
             Serial.printf("[ESP32SelfSignedCert] Failed to open DER file %s\n", certFile);
@@ -181,22 +214,137 @@ void ESP32SelfSignedCert::generateSelfSignedCertificate(bool usePEM,
             derFile.close();
             Serial.printf("[ESP32SelfSignedCert] Saved DER certificate to %s\n", certFile);
         }
-
         saveToFile(keyFile, keyBuffer);
 
         Serial.println("[ESP32SelfSignedCert] Certificate (DER - hex format):\n");
         for (int i = 0; i < ret; i++) {
             Serial.printf("%02X", certBuffer[i] & 0xFF);
-            if ((i + 1) % 16 == 0) Serial.println();
-            else Serial.print(" ");
+            if ((i + 1) % 16 == 0)
+                Serial.println();
+            else
+                Serial.print(" ");
         }
         Serial.println();
     }
 
 cleanup:
-    // Cleanup
+    // Free mbedTLS contexts
     mbedtls_pk_free(&key);
     mbedtls_entropy_free(&entropy);
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_x509write_crt_free(&cert);
+}
+
+/**
+ * High-level generation function that uses default certificate settings.
+ * If the system time is valid, the certificate's validity is set from January 1
+ * of the current year to January 1 ten years later. Otherwise, it falls back to
+ * hardcoded dates (January 1, 2025 to January 1, 2035).
+ */
+bool ESP32SelfSignedCert::generate() {
+    // Define default settings for certificate details
+    CertSettings settings;
+    settings.commonName   = "ESP32";
+    settings.organization = "MyOrganization";
+    settings.country      = "US";
+
+    // Obtain current system time
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    int currentYear = timeinfo.tm_year + 1900;
+
+    // Prepare validity date strings (format: "YYYYMMDDHHMMSS")
+    char validFrom[15];
+    char validTo[15];
+
+    // Check for valid system time; use fallback dates if necessary
+    if (currentYear < 2000) {
+        // Fallback: January 1, 2025 to January 1, 2035
+        sprintf(validFrom, "%04d0101000000", 2025);
+        sprintf(validTo,   "%04d0101000000", 2035);
+        Serial.printf("[ESP32SelfSignedCert] Invalid system time. Using hardcoded validity: %s to %s\n", validFrom, validTo);
+    } else {
+        // Use current year: validity from January 1, currentYear to January 1, currentYear+10
+        sprintf(validFrom, "%04d0101000000", currentYear);
+        sprintf(validTo,   "%04d0101000000", currentYear + 10);
+        Serial.printf("[ESP32SelfSignedCert] Generating certificate valid from %s to %s\n", validFrom, validTo);
+    }
+    settings.validFrom = String(validFrom);
+    settings.validTo   = String(validTo);
+
+    // Generate certificate in PEM format and save to default file paths
+    generateSelfSignedCertificate(true, settings, "/cert.pem", "/key.pem");
+
+    // Confirm generation succeeded by checking that the internal buffers are populated
+    if (strlen(certBuffer) == 0 || strlen(keyBuffer) == 0) {
+        Serial.println("[ESP32SelfSignedCert] Certificate generation failed");
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Return the generated certificate from the internal buffer.
+ */
+String ESP32SelfSignedCert::getCert() {
+    return String(certBuffer);
+}
+
+/**
+ * Return the generated private key from the internal buffer.
+ */
+String ESP32SelfSignedCert::getPrivateKey() {
+    return String(keyBuffer);
+}
+
+/**
+ * Print the contents of a file stored in LittleFS to Serial.
+ */
+void ESP32SelfSignedCert::printFile(const char *filename) {
+    File file = LittleFS.open(filename, "r");
+    if (!file) {
+        Serial.printf("[ESP32SelfSignedCert] Failed to open file %s for reading\n", filename);
+        return;
+    }
+    Serial.printf("[ESP32SelfSignedCert] Contents of %s:\n", filename);
+    while (file.available()) {
+        Serial.write(file.read());
+    }
+    file.close();
+    Serial.println();
+}
+
+/**
+ * Extract and print details from the generated certificate.
+ * This function parses the certificate stored in certBuffer using mbedTLS,
+ * prints a human-readable summary to Serial, and returns true if the parsing
+ * and extraction were successful.
+ */
+bool ESP32SelfSignedCert::extractCertDetails() {
+    // Ensure the certificate buffer is not empty
+    if (strlen(certBuffer) == 0) {
+        Serial.println("[ESP32SelfSignedCert] No certificate available for parsing.");
+        return false;
+    }
+
+    mbedtls_x509_crt crt;
+    mbedtls_x509_crt_init(&crt);
+
+    // Parse the certificate from the internal PEM buffer (including the null terminator)
+    int ret = mbedtls_x509_crt_parse(&crt, (const unsigned char*)certBuffer, strlen(certBuffer) + 1);
+    if (ret != 0) {
+        Serial.printf("[ESP32SelfSignedCert] Failed to parse certificate, error: -0x%04X\n", -ret);
+        mbedtls_x509_crt_free(&crt);
+        return false;
+    }
+
+    // Create a buffer to hold the certificate info
+    char infoBuf[1024];
+    mbedtls_x509_crt_info(infoBuf, sizeof(infoBuf) - 1, "  ", &crt);
+    Serial.println("[ESP32SelfSignedCert] Certificate Details:");
+    Serial.println(infoBuf);
+
+    mbedtls_x509_crt_free(&crt);
+    return true;
 }

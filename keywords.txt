@@ -1,0 +1,4 @@
+ESP32SelfSignedCert	KEYWORD1
+generateSelfSignedCertificate	KEYWORD2
+saveToFile	KEYWORD2
+CertSettings	KEYWORD2
